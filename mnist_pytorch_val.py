@@ -1,9 +1,11 @@
 import torch
 import numpy as np
+import time
 
 from torch import nn
 from torch.nn import functional as F
 from torchvision import datasets, transforms
+
 from matplotlib import pyplot as plt
 
 # Convert data to torch.FloatTensor
@@ -15,8 +17,20 @@ train_data = datasets.MNIST(root='data', train=True,
 test_data = datasets.MNIST(root='data', train=False,
                            download=True, transform=transform)
 
+# obtain training indices that will be used for validation
+num_train = len(train_data)
+indices = list(range(num_train))
+np.random.shuffle(indices)
+split = int(np.floor(0.2*num_train))  # 20% will be validation set
+train_idx, val_idx = indices[split:], indices[:split]
+
+# define samplers for obtaining training and validation sets
+train_sampler = torch.utils.data.sampler.SubsetRandomSampler(train_idx)
+val_sampler = torch.utils.data.sampler.SubsetRandomSampler(val_idx)
+
 # Prepare data loaders
-train_loader = torch.utils.data.DataLoader(train_data, batch_size=32)
+train_loader = torch.utils.data.DataLoader(train_data, batch_size=32, sampler=train_sampler)
+val_loader = torch.utils.data.DataLoader(train_data, batch_size=32, sampler=val_sampler)
 test_loader = torch.utils.data.DataLoader(test_data, batch_size=32)
 
 # Visualize sample images
@@ -60,12 +74,28 @@ criterion = nn.CrossEntropyLoss()
 # specify optimizer
 optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
 
-epochs = 1
+# Use GPU?
+cuda = True
+if cuda:
+    model.cuda()
+else:
+    model.cpu()
 
+# number of epochs
+epochs = 20
+
+# initialize tracker for minimum validation loss
+val_loss_min = np.Inf
+
+start = time.time()
 for epoch in range(epochs):
     train_loss = 0  # monitor training loss
+    val_loss = 0  # monitor vaalidation loss
 
+    # train batch loop
     for images, labels in train_loader:
+        if cuda:
+            images, labels = images.cuda(), labels.cuda()
         optimizer.zero_grad()  # clear the gradients
         outputs = model(images)  # forward pass
         loss = criterion(outputs, labels)  # calcualte the loss
@@ -73,15 +103,41 @@ for epoch in range(epochs):
         optimizer.step()  # parameter update
         train_loss += loss.item()
 
-    train_loss = train_loss/len(train_loader)
+    # validation batch loop
+    model.eval()
+    for images, labels in val_loader:
+        if cuda:
+            images, labels = images.cuda(), labels.cuda()
+        outputs = model(images)
+        loss = criterion(outputs, labels)
+        val_loss += loss.item()
 
-    print('Epoch {} \tTraining loss: {:.6f}'.format(epoch+1, train_loss))
+    model.train()
+
+    # Calculate average loss for epoch
+    train_loss = train_loss/len(train_loader)
+    val_loss = val_loss/len(val_loader)
+
+    print('Epoch {} \tTraining loss: {:.6f} \tValidation loss: {:.6f}'.format(epoch+1, train_loss, val_loss))
+
+    if val_loss <= val_loss_min:
+        print('Validation loss decreased ({:.6f} --> {:.6f}. Saving model'. format(
+            val_loss_min, val_loss
+        ))
+        torch.save(model.state_dict(), 'best_model.pth')
+        val_loss_min = val_loss
+
+print("Elapsed time: {}".format(time.time()-start))
+
+# Load the best model parameters and test it
+model.load_state_dict(torch.load('best_model.pth'))
 
 # Test the model
 test_loss = 0
 class_correct = list(0 for i in range(10))
 class_total = list(0 for i in range(10))
 
+model.cpu()
 model.eval()  # prep for model evaluation
 
 for images, labels in test_loader:
